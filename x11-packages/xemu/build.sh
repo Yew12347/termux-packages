@@ -21,9 +21,11 @@ lib/python*
 termux_step_get_source() {
 	mkdir -p "$TERMUX_PKG_SRCDIR"
 	cd "$TERMUX_PKG_SRCDIR"
-	git clone https://github.com/xemu-project/xemu .
-	git checkout $_COMMIT
+	git clone https://github.com/xemu-project/xemu
+	cd xemu
+	git checkout ${_COMMIT}
 	git submodule update --init --recursive
+	mv * .* ../
 }
 
 termux_step_post_get_source() {
@@ -36,16 +38,35 @@ termux_step_post_get_source() {
 # ---------------- PRE-CONFIGURE ----------------
 
 termux_step_pre_configure() {
-	if [ "$TERMUX_ARCH" = "aarch64" ]; then
-		mkdir -p _lib
-		$CC $CFLAGS -c $TERMUX_PKG_BUILDER_DIR/setjmp-aarch64/setjmp.S
-		$AR cru _lib/libandroid-setjmp.a setjmp.o
-		LDFLAGS+=" -L$PWD/_lib -l:libandroid-setjmp.a"
+	# Workaround for https://github.com/termux/termux-packages/issues/12261.
+	if [ $TERMUX_ARCH = "aarch64" ]; then
+		rm -f $TERMUX_PKG_BUILDDIR/_lib
+		mkdir -p $TERMUX_PKG_BUILDDIR/_lib
+
+		cd $TERMUX_PKG_BUILDDIR
+		mkdir -p _setjmp-aarch64
+		pushd _setjmp-aarch64
+		mkdir -p private
+		local s
+		for s in $TERMUX_PKG_BUILDER_DIR/setjmp-aarch64/{setjmp.S,private-*.h}; do
+			local f=$(basename ${s})
+			cp ${s} ./${f/-//}
+		done
+		$CC $CFLAGS $CPPFLAGS -I. setjmp.S -c
+		$AR cru $TERMUX_PKG_BUILDDIR/_lib/libandroid-setjmp.a setjmp.o
+		popd
+
+		LDFLAGS+=" -L$TERMUX_PKG_BUILDDIR/_lib -l:libandroid-setjmp.a"
 	fi
 
 	termux_setup_cmake
 	termux_setup_ninja
-	pip install --break-system-packages pyyaml
+	if [ "$TERMUX_ON_DEVICE_BUILD" = "true" ]; then
+		termux_setup_python_pip
+		pip install pyyaml
+	else
+		pip install --break-system-packages pyyaml
+	fi
 }
 
 # ---------------- CONFIGURE ----------------
