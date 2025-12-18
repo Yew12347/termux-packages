@@ -32,73 +32,118 @@ jobs:
       matrix:
         target_arch: [aarch64, arm, i686, x86_64]
       fail-fast: false
+
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1000
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 1000
 
-      - name: Install dependencies
-        run: |
-          sudo apt update && sudo apt install -y \
-            git wget curl unzip python3 python3-pip ninja-build \
-            openjdk-17-jdk clang cmake build-essential pkg-config
+    - name: Install host dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y \
+          git wget curl unzip jq \
+          python3 python3-pip \
+          ninja-build clang cmake \
+          build-essential pkg-config \
+          openjdk-17-jdk docker.io
 
-      - name: Setup Android NDK/SDK
-        run: |
-          export ANDROID_SDK_ROOT=$HOME/android-sdk
-          export ANDROID_NDK=$HOME/android-ndk
-          mkdir -p $ANDROID_SDK_ROOT $ANDROID_NDK
-          # Download NDK (change version if needed)
-          wget -q https://dl.google.com/android/repository/android-ndk-r25b-linux.zip -O ndk.zip
-          unzip -q ndk.zip -d $HOME
-          mv $HOME/android-ndk-r25b $ANDROID_NDK
-          rm ndk.zip
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
-          echo "ANDROID_NDK=$ANDROID_NDK" >> $GITHUB_ENV
+    # ------------------------------------------------------------
+    # ANDROID SDK / NDK (THIS FIXES YOUR ERROR)
+    # ------------------------------------------------------------
+    - name: Setup Android NDK/SDK
+      run: |
+        set -e
 
-      - name: Gather build summary
-        id: build-info
-        env:
-          MANUAL_INPUT_PACKAGES: ${{ github.event.inputs.packages }}
-        run: |
-          mkdir -p ./debs ./artifacts
-          touch ./debs/.placeholder
-          
+        export ANDROID_SDK_ROOT="$HOME/android-sdk"
+        export ANDROID_NDK_ROOT="$HOME/android-ndk"
+
+        mkdir -p "$ANDROID_SDK_ROOT"
+
+        echo "[*] Downloading Android NDK r25b"
+        wget -q https://dl.google.com/android/repository/android-ndk-r25b-linux.zip -O ndk.zip
+        unzip -q ndk.zip -d "$HOME"
+        mv "$HOME/android-ndk-r25b" "$ANDROID_NDK_ROOT"
+        rm ndk.zip
+
+        echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
+        echo "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT" >> $GITHUB_ENV
+
+    - name: Debug NDK (sanity check)
+      run: |
+        echo "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT"
+        ls -la "$ANDROID_NDK_ROOT"
+        test -d "$ANDROID_NDK_ROOT/toolchains"
+
+    # ------------------------------------------------------------
+    # GATHER PACKAGES
+    # ------------------------------------------------------------
+    - name: Gather build summary
+      id: build-info
+      env:
+        MANUAL_INPUT_PACKAGES: ${{ github.event.inputs.packages }}
+      run: |
+        set -e
+
+        mkdir -p debs artifacts
+        touch debs/.placeholder
+
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          read -a PACKAGES <<< "${MANUAL_INPUT_PACKAGES//$'\n'/ }"
+        else
           PACKAGES=""
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            read -a PACKAGES <<< "${MANUAL_INPUT_PACKAGES//$'\n'/ }"
-          else
-            # Auto-detect changed packages from commit/pull request
-            CHANGED_FILES=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} || true)
-            for repo_path in $(jq --raw-output 'del(.pkg_format) | keys | .[]' repo.json); do
-              for pkg_dir in $(find $repo_path -maxdepth 1 -type d | tail -n +2); do
-                pkg=$(basename $pkg_dir)
-                if grep -q "^$repo_path/$pkg" <<< "$CHANGED_FILES"; then
-                  echo "$pkg" >> ./built_$(jq -r ".\"$repo_path\".name" repo.json)_packages.txt
-                fi
-              done
+          CHANGED_FILES=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} || true)
+
+          for repo_path in $(jq -r 'del(.pkg_format) | keys[]' repo.json); do
+            repo=$(jq -r ".\"$repo_path\".name" repo.json)
+
+            for pkg in $(find "$repo_path" -maxdepth 1 -mindepth 1 -type d -printf '%f\n'); do
+              if grep -q "^$repo_path/$pkg" <<< "$CHANGED_FILES"; then
+                echo "$pkg" >> "built_${repo}_packages.txt"
+                PACKAGES="$PACKAGES $pkg"
+              fi
             done
-          fi
-          echo "PACKAGES=${PACKAGES[*]}" >> $GITHUB_OUTPUT
+          done
+        fi
 
-      - name: Build packages
-        env:
-          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
-          ANDROID_NDK: ${{ env.ANDROID_NDK }}
-          PACKAGES: ${{ steps.build-info.outputs.PACKAGES }}
-        run: |
-          if [ -n "$PACKAGES" ]; then
-            ./scripts/run-docker.sh ./build-package.sh -I -a ${{ matrix.target_arch }} $PACKAGES || true
-            mv output/*.deb ./debs/ || true
-          fi
+        PACKAGES="$(echo "$PACKAGES" | xargs)"
+        echo "PACKAGES=$PACKAGES" >> $GITHUB_OUTPUT
+        echo "[*] Packages: $PACKAGES"
 
-      - name: Archive artifacts
-        run: |
-          tar cf artifacts/debs-${{ matrix.target_arch }}-${{ github.sha }}.tar debs
-          
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: debs-${{ matrix.target_arch }}-${{ github.sha }}
-          path: artifacts/debs-${{ matrix.target_arch }}-${{ github.sha }}.tar
+    # ------------------------------------------------------------
+    # BUILD
+    # ------------------------------------------------------------
+    - name: Build packages
+      env:
+        ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
+        ANDROID_NDK_ROOT: ${{ env.ANDROID_NDK_ROOT }}
+        PACKAGES: ${{ steps.build-info.outputs.PACKAGES }}
+      run: |
+        set -e
+
+        if [ -z "$PACKAGES" ]; then
+          echo "[*] No packages to build"
+          exit 0
+        fi
+
+        ./scripts/run-docker.sh env \
+          ANDROID_SDK_ROOT="$ANDROID_SDK_ROOT" \
+          ANDROID_NDK_ROOT="$ANDROID_NDK_ROOT" \
+          ./build-package.sh -I -a ${{ matrix.target_arch }} $PACKAGES
+
+        mkdir -p debs
+        mv output/*.deb debs/ || true
+
+    # ------------------------------------------------------------
+    # ARTIFACTS
+    # ------------------------------------------------------------
+    - name: Archive artifacts
+      run: |
+        tar cf artifacts/debs-${{ matrix.target_arch }}-${{ github.sha }}.tar debs
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: debs-${{ matrix.target_arch }}-${{ github.sha }}
+        path: artifacts/debs-${{ matrix.target_arch }}-${{ github.sha }}.tar
