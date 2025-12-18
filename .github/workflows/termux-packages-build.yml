@@ -56,23 +56,23 @@ jobs:
             echo "PACKAGES=" >> $GITHUB_OUTPUT
           fi
 
-    - name: Build packages
-      env:
-        DOCKER_BUILD: ${{ steps.build-info.outputs.docker-build }}
-      run: |
-        declare -a packages
-        for repo_path in $(jq --raw-output 'del(.pkg_format) | keys | .[]' repo.json); do
-          repo=$(jq --raw-output '.["'${repo_path}'"].name' repo.json)
-          if [ -f ./built_${repo}_packages.txt ]; then
-            packages="$packages $(cat ./built_${repo}_packages.txt | tr '\n' ' ')"
-          fi
-        done
+      - name: Build packages in Docker
+        env:
+          DOCKER_BUILD: ${{ steps.build-info.outputs.docker-build }}
+        run: |
+          declare -a packages
+          for repo_path in $(jq --raw-output 'del(.pkg_format) | keys | .[]' repo.json); do
+            repo=$(jq --raw-output '.["'${repo_path}'"].name' repo.json)
+            if [ -f ./built_${repo}_packages.txt ]; then
+              packages="$packages $(cat ./built_${repo}_packages.txt | tr '\n' ' ')"
+            fi
+          done
 
-        if [ "$DOCKER_BUILD" == 'false' ]; then
-          NDK=$ANDROID_NDK ANDROID_HOME=$ANDROID_SDK_ROOT ./build-package.sh -I -a ${{ matrix.target_arch }} $packages
-        elif [ -n "$packages" ]; then
-          ./scripts/run-docker.sh ./build-package.sh -I -a ${{ matrix.target_arch }} $packages
-        fi
+          if [ "$DOCKER_BUILD" == 'false' ]; then
+            NDK=$ANDROID_NDK ANDROID_HOME=$ANDROID_SDK_ROOT ./build-package.sh -I -a ${{ matrix.target_arch }} $packages
+          elif [ -n "$packages" ]; then
+            ./scripts/run-docker.sh ./build-package.sh -I -a ${{ matrix.target_arch }} $packages
+          fi
           mv output/*.deb ../
 
       - name: Archive build artifacts
