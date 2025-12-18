@@ -59,6 +59,7 @@ jobs:
       - name: Build packages in Docker
         env:
           DOCKER_BUILD: ${{ steps.build-info.outputs.docker-build }}
+          PACKAGES: $
         run: |
           declare -a packages
           for repo_path in $(jq --raw-output 'del(.pkg_format) | keys | .[]' repo.json); do
