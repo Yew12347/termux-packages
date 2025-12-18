@@ -21,11 +21,13 @@ on:
         description: "Space-separated package names for rebuild"
         required: true
 
-permissions: {} # default minimal
+permissions: {}
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         target_arch: [aarch64, arm, i686, x86_64]
@@ -36,54 +38,67 @@ jobs:
         with:
           fetch-depth: 1000
 
-      - name: Setup environment
+      - name: Install dependencies
         run: |
           sudo apt update && sudo apt install -y \
             git wget curl unzip python3 python3-pip ninja-build \
             openjdk-17-jdk clang cmake build-essential pkg-config
 
-      - name: Gather package list
-        id: gather
+      - name: Setup Android NDK/SDK
+        run: |
+          export ANDROID_SDK_ROOT=$HOME/android-sdk
+          export ANDROID_NDK=$HOME/android-ndk
+          mkdir -p $ANDROID_SDK_ROOT $ANDROID_NDK
+          # Download NDK (change version if needed)
+          wget -q https://dl.google.com/android/repository/android-ndk-r25b-linux.zip -O ndk.zip
+          unzip -q ndk.zip -d $HOME
+          mv $HOME/android-ndk-r25b $ANDROID_NDK
+          rm ndk.zip
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
+          echo "ANDROID_NDK=$ANDROID_NDK" >> $GITHUB_ENV
+
+      - name: Gather build summary
+        id: build-info
         env:
           MANUAL_INPUT_PACKAGES: ${{ github.event.inputs.packages }}
         run: |
           mkdir -p ./debs ./artifacts
-          # workflow_dispatch input packages
+          touch ./debs/.placeholder
+          
+          PACKAGES=""
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             read -a PACKAGES <<< "${MANUAL_INPUT_PACKAGES//$'\n'/ }"
-            echo "PACKAGES=${PACKAGES[*]}" >> $GITHUB_OUTPUT
           else
-            echo "PACKAGES=" >> $GITHUB_OUTPUT
+            # Auto-detect changed packages from commit/pull request
+            CHANGED_FILES=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} || true)
+            for repo_path in $(jq --raw-output 'del(.pkg_format) | keys | .[]' repo.json); do
+              for pkg_dir in $(find $repo_path -maxdepth 1 -type d | tail -n +2); do
+                pkg=$(basename $pkg_dir)
+                if grep -q "^$repo_path/$pkg" <<< "$CHANGED_FILES"; then
+                  echo "$pkg" >> ./built_$(jq -r ".\"$repo_path\".name" repo.json)_packages.txt
+                fi
+              done
+            done
           fi
+          echo "PACKAGES=${PACKAGES[*]}" >> $GITHUB_OUTPUT
 
-      - name: Build packages in Docker
+      - name: Build packages
         env:
-          DOCKER_BUILD: ${{ steps.build-info.outputs.docker-build }}
-          PACKAGES: $
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
+          ANDROID_NDK: ${{ env.ANDROID_NDK }}
+          PACKAGES: ${{ steps.build-info.outputs.PACKAGES }}
         run: |
-          declare -a packages
-          for repo_path in $(jq --raw-output 'del(.pkg_format) | keys | .[]' repo.json); do
-            repo=$(jq --raw-output '.["'${repo_path}'"].name' repo.json)
-            if [ -f ./built_${repo}_packages.txt ]; then
-              packages="$packages $(cat ./built_${repo}_packages.txt | tr '\n' ' ')"
-            fi
-          done
-
-          if [ "$DOCKER_BUILD" == 'false' ]; then
-            NDK=$ANDROID_NDK ANDROID_HOME=$ANDROID_SDK_ROOT ./build-package.sh -I -a ${{ matrix.target_arch }} $packages
-          elif [ -n "$packages" ]; then
-            ./scripts/run-docker.sh ./build-package.sh -I -a ${{ matrix.target_arch }} $packages
+          if [ -n "$PACKAGES" ]; then
+            ./scripts/run-docker.sh ./build-package.sh -I -a ${{ matrix.target_arch }} $PACKAGES || true
+            mv output/*.deb ./debs/ || true
           fi
-          mv output/*.deb ../
 
-      - name: Archive build artifacts
+      - name: Archive artifacts
         run: |
-          mkdir -p artifacts
-          mv *.deb artifacts/ || true
-          tar cf artifacts/debs-${{ matrix.target_arch }}.tar artifacts/
-
+          tar cf artifacts/debs-${{ matrix.target_arch }}-${{ github.sha }}.tar debs
+          
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: debs-${{ matrix.target_arch }}
-          path: artifacts/debs-${{ matrix.target_arch }}.tar
+          name: debs-${{ matrix.target_arch }}-${{ github.sha }}
+          path: artifacts/debs-${{ matrix.target_arch }}-${{ github.sha }}.tar
