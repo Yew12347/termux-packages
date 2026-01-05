@@ -38,27 +38,7 @@ termux_step_post_get_source() {
 # ---------------- PRE-CONFIGURE ----------------
 
 termux_step_pre_configure() {
-	# Workaround for https://github.com/termux/termux-packages/issues/12261.
-	if [ $TERMUX_ARCH = "aarch64" ]; then
-		rm -f $TERMUX_PKG_BUILDDIR/_lib
-		mkdir -p $TERMUX_PKG_BUILDDIR/_lib
-
-		cd $TERMUX_PKG_BUILDDIR
-		mkdir -p _setjmp-aarch64
-		pushd _setjmp-aarch64
-		mkdir -p private
-		local s
-		for s in $TERMUX_PKG_BUILDER_DIR/setjmp-aarch64/{setjmp.S,private-*.h}; do
-			local f=$(basename ${s})
-			cp ${s} ./${f/-//}
-		done
-		$CC $CFLAGS $CPPFLAGS -I. setjmp.S -c
-		$AR cru $TERMUX_PKG_BUILDDIR/_lib/libandroid-setjmp.a setjmp.o
-		popd
-
-		LDFLAGS+=" -L$TERMUX_PKG_BUILDDIR/_lib -l:libandroid-setjmp.a"
-	fi
-
+	# Skip setjmp/_lib hacks
 	termux_setup_cmake
 	termux_setup_ninja
 	if [ "$TERMUX_ON_DEVICE_BUILD" = "true" ]; then
@@ -72,7 +52,7 @@ termux_step_pre_configure() {
 # ---------------- CONFIGURE ----------------
 
 termux_step_configure() {
-	CFLAGS+=" -DANDROID -DEGL_NO_X11"
+	CFLAGS+=" -DANDROID"
 	CXXFLAGS+=" $CFLAGS"
 	LDFLAGS+=" -llog -landroid-shmem"
 
@@ -99,6 +79,8 @@ termux_step_configure() {
 	--enable-trace-backends=nop
 	--target-list=i386-softmmu
 	--extra-cflags=-DXBOX=1
+	--enable-gtk
+	--enable-x11
 	"
 
 	if [ "$TERMUX_ON_DEVICE_BUILD" = "true" ]; then
@@ -162,12 +144,16 @@ termux_step_make_install() {
 
 	cat > "$TERMUX_PREFIX/bin/xemu" <<'EOF'
 #!/data/data/com.termux/files/usr/bin/bash
-export QEMU_GL=egl
-export SDL_RENDER_DRIVER=vulkan
+
+# GTK + X11 windowed mode for Openbox or X11
+export DISPLAY=:0
+export SDL_RENDER_DRIVER=opengl
+export QEMU_GL=on
 export VK_ICD_FILENAMES=$PREFIX/share/vulkan/icd.d/turnip_icd.json
 export MESA_LOADER_DRIVER_OVERRIDE=zink
 export GALLIUM_DRIVER=zink
-exec /data/data/com.termux/files/usr/libexec/xemu-bin -vulkan "$@"
+
+exec "$PREFIX/libexec/xemu-bin" "$@"
 EOF
 	chmod +x "$TERMUX_PREFIX/bin/xemu"
 
